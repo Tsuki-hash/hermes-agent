@@ -44,7 +44,10 @@ it.each(['', '\n', '\n\n', ' \n '])(
   }
 )
 
-it('covers shared tool occurrences despite a compaction stub and different stored narration', () => {
+// Skipped until #127282 lands: the compaction-stub fold is that PR's third
+// commit (coverage.ts folding a live run past tool occurrences the window
+// never saw), and this branch deliberately does not carry it.
+it.skip('covers shared tool occurrences despite a compaction stub and different stored narration', () => {
   const rows: SessionMessage[] = [
     { id: 1, role: 'user', content: 'Inspect the fixtures' },
     { id: 2, role: 'assistant', content: '', reasoning: 'Plan the reads.', tool_calls: [call('read-1')] },

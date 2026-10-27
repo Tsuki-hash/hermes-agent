@@ -20,7 +20,7 @@ const renderedText = (raw: string) => {
 interface PersistedTurn {
   prompt: ChatMessage
   start: number
-  rawIntervals: string[]
+  rawIntervals: string[][]
   messages: ChatMessage[]
 }
 
@@ -89,7 +89,7 @@ function candidateTurn(
   return {
     prompt: messages[displayStart],
     start: displayStart,
-    rawIntervals: intervals.map(texts => texts.join('\n\n')),
+    rawIntervals: intervals,
     messages: turnMessages
   }
 }
@@ -137,26 +137,42 @@ function splitAtUsers(messages: ChatMessage[]) {
   return { intervals, users }
 }
 
-/** Prefix races are symmetric; cuts address raw producer text, never rendered Markdown. */
-function unrepresentedText(snapshot: string, stored: string): string {
-  // Separators between rounds can lead an interval after a correction.
-  const leading = snapshot.length - snapshot.trimStart().length
-  const text = snapshot.slice(leading)
-  const prefix = stored.trim()
+/** Prefix races are symmetric; cuts address raw producer text, never rendered
+ *  Markdown. Segments are matched in stored order against the snapshot's raw
+ *  bytes, separated by whatever whitespace the stream actually emitted — the
+ *  backend appends deltas as received and injects no separator, so the join a
+ *  human would write between paragraphs cannot be assumed. A segment that
+ *  never appears, a gap carrying non-whitespace, or a remainder that is not a
+ *  cut short of the next segment leaves the whole snapshot unrepresented. */
+function unrepresentedText(snapshot: string, segments: string[]): string {
+  let cursor = 0
 
-  if (!prefix) {
-    return snapshot
+  for (const segment of segments) {
+    let at = snapshot.indexOf(segment, cursor)
+
+    while (at > 0 && /\S/.test(snapshot.slice(cursor, at))) {
+      at = snapshot.indexOf(segment, at + 1)
+    }
+
+    if (at < 0) {
+      // A re-attach mid-segment leaves the snapshot a cut short of the next
+      // segment: everything up to that cut is covered, nothing is new yet.
+      const remainder = snapshot.slice(cursor)
+      const gap = remainder.match(/^\s*/)![0]
+
+      for (let cut = 0; cut <= gap.length; cut++) {
+        if (segment.startsWith(remainder.slice(cut))) {
+          return ''
+        }
+      }
+
+      return snapshot
+    }
+
+    cursor = at + segment.length
   }
 
-  if (text.startsWith(prefix)) {
-    return text.slice(prefix.length)
-  }
-
-  if (prefix.startsWith(text)) {
-    return ''
-  }
-
-  return snapshot
+  return snapshot.slice(cursor)
 }
 
 function snapshotIntervals(inflight: NonNullable<SessionResumeResult['inflight']>): string[] {
@@ -250,7 +266,7 @@ export function reconcilePersistedLiveTurn(
 
   for (let index = 0; index < snapshots.length; index++) {
     const durable = stored.intervals[index] ?? []
-    const raw = turn.rawIntervals[index] ?? ''
+    const raw = turn.rawIntervals[index] ?? []
     // No usable correction offsets means only the complete initial prefix can
     // be proven; don't apply a later interval's normalized length to this dump.
     const text = unrepresentedText(snapshots[index], raw)
