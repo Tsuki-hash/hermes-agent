@@ -20,7 +20,7 @@ const renderedText = (raw: string) => {
 interface PersistedTurn {
   prompt: ChatMessage
   start: number
-  rawIntervals: string[]
+  rawIntervalTexts: string[][]
   messages: ChatMessage[]
 }
 
@@ -89,7 +89,11 @@ function candidateTurn(
   return {
     prompt: messages[displayStart],
     start: displayStart,
-    rawIntervals: intervals.map(texts => texts.join('\n\n')),
+    // Keep the persisted occurrences separate: the live stream joins them
+    // with whatever separator the model emitted, not the '\n\n' used to
+    // display them, so the suffix cut must match occurrences, not the
+    // joined text.
+    rawIntervalTexts: intervals,
     messages: turnMessages
   }
 }
@@ -137,26 +141,47 @@ function splitAtUsers(messages: ChatMessage[]) {
   return { intervals, users }
 }
 
-/** Prefix races are symmetric; cuts address raw producer text, never rendered Markdown. */
-function unrepresentedText(snapshot: string, stored: string): string {
+/**
+ * Prefix races are symmetric; cuts address raw producer text, never rendered Markdown.
+ *
+ * The backend concatenates stream deltas as received, so the separator the
+ * live stream used between two persisted occurrences is whatever the model
+ * emitted — not necessarily the '\n\n' the persisted rows are joined with.
+ * Match the occurrences in order at the current position, allowing only
+ * whitespace between them; anything after the last matched occurrence is
+ * the genuinely new suffix. Matching is positional, never a search, so
+ * equal prose elsewhere in the transcript cannot collapse unrelated turns.
+ */
+function unrepresentedText(snapshot: string, stored: string[]): string {
   // Separators between rounds can lead an interval after a correction.
   const leading = snapshot.length - snapshot.trimStart().length
-  const text = snapshot.slice(leading)
-  const prefix = stored.trim()
+  let text = snapshot.slice(leading)
 
-  if (!prefix) {
+  const occurrences = stored.map(occurrence => occurrence.trim()).filter(Boolean)
+
+  if (!occurrences.length) {
     return snapshot
   }
 
-  if (text.startsWith(prefix)) {
-    return text.slice(prefix.length)
+  for (const [index, occurrence] of occurrences.entries()) {
+    if (index > 0) {
+      // Only whitespace may separate occurrences in the live stream:
+      // anything else is genuinely new text and aborts the match below.
+      text = text.trimStart()
+    }
+
+    if (text.startsWith(occurrence)) {
+      text = text.slice(occurrence.length)
+    } else if (occurrence.startsWith(text)) {
+      // The live stream ends inside this occurrence; nothing is
+      // unrepresented yet.
+      return ''
+    } else {
+      return snapshot
+    }
   }
 
-  if (prefix.startsWith(text)) {
-    return ''
-  }
-
-  return snapshot
+  return text
 }
 
 function snapshotIntervals(inflight: NonNullable<SessionResumeResult['inflight']>): string[] {
@@ -250,7 +275,7 @@ export function reconcilePersistedLiveTurn(
 
   for (let index = 0; index < snapshots.length; index++) {
     const durable = stored.intervals[index] ?? []
-    const raw = turn.rawIntervals[index] ?? ''
+    const raw = turn.rawIntervalTexts[index] ?? []
     // No usable correction offsets means only the complete initial prefix can
     // be proven; don't apply a later interval's normalized length to this dump.
     const text = unrepresentedText(snapshots[index], raw)
